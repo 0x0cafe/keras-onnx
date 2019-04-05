@@ -131,6 +131,7 @@ class YOLO(object):
             self.boxes, self.scores= self.generate()
         self.session = None
         self.session_final = None
+        self.session_merge = None
         self.final_model = None
         K.set_learning_phase(0)
 
@@ -252,19 +253,15 @@ class YOLO(object):
 
         print(image_data.shape)
         image_data = np.expand_dims(image_data, 0)  # Add batch dimension.
-        r = self.session.run(None, input_feed={'input_1:01': image_data})
-        feed_f = dict(zip(['image_shape:01', 'y1:01', 'y2:01', 'y3:01'],
-                          (np.array([image.size[1], image.size[0]], dtype=np.int32).reshape(1, 2),
-                           r[0],
-                           r[1],
-                           r[2])))
-        all_boxes, all_scores, indices = self.session_final.run(None, input_feed=feed_f)
+        feed_f = dict(zip(['input_1:01', 'image_shape:01'],
+                          (image_data, np.array([image.size[1], image.size[0]], dtype=np.int32).reshape(1, 2))))
+        all_boxes, all_scores, indices = self.session_merge.run(None, input_feed=feed_f)
 
         out_boxes, out_scores, out_classes = [], [], []
         for idx_ in indices:
             out_classes.append(idx_[1])
             out_scores.append(all_scores[tuple(idx_)])
-            idx_1 = (idx_[0], 0, idx_[2])
+            idx_1 = (idx_[0], idx_[2])
             out_boxes.append(all_boxes[idx_1])
 
         """
@@ -281,7 +278,7 @@ class YOLO(object):
 
         print('Found {} boxes for {}'.format(len(out_boxes), 'img'))
 
-        font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
+        font = ImageFont.truetype(font=self._get_data_path('font/FiraMono-Medium.otf'),
                                   size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
         thickness = (image.size[0] + image.size[1]) // 300
 
@@ -327,6 +324,8 @@ def detect_img(yolo, name):
     image = Image.open(name)
     yolo.session = onnxruntime.InferenceSession('model_data/yolov3_0.onnx')
     yolo.session_final = onnxruntime.InferenceSession('model_data/yolov3_1.onnx')
+    yolo.session_merge = onnxruntime.InferenceSession('model_data/yolov3.onnx')
+
     r_image = yolo.detect_with_onnx(image)
 
     n_ext = name.rindex('.')
@@ -358,7 +357,7 @@ def convert_NMSLayer(scope, operator, container):
     score_batch = scope.get_unique_variable_name(operator.inputs[1].full_name + '_btc')
 
     container.add_node("Unsqueeze", box_transpose,
-                       box_batch, op_version=operator.target_opset, axes=[0, 1])
+                       box_batch, op_version=operator.target_opset, axes=[0])
     container.add_node("Unsqueeze", score_transpose,
                        score_batch, op_version=operator.target_opset, axes=[0])
 
@@ -391,7 +390,7 @@ set_converter(YOLONMSLayer, convert_NMSLayer)
 
 def convert_model(yolo, name0, name1):
     yolo.load_model()
-    target_opset_number = 10
+    target_opset_number = 9
     if not os.path.exists(name0):
         onnxmodel = convert_keras(yolo.yolo_model, channel_first_inputs=['input_1'],
                                   debug_mode=True, custom_op_conversions=_custom_op_handlers, target_opset=target_opset_number)
@@ -401,12 +400,78 @@ def convert_model(yolo, name0, name1):
     onnx.save_model(oxmlfinal, name1)
 
 
+def merge_model(name0, name1, name_output):
+    if not (os.path.exists(name0) and os.path.exists(name1)):
+        raise RuntimeError('The source submodels do not exist for merging.')
+
+    if os.path.exists(name_output):
+        print("The merged model already exists, skip merging")
+        return
+
+    import onnx
+    yolo_0 = onnx.load_model(name0)
+    yolo_0_graph = yolo_0.graph
+    yolo_1 = onnx.load_model(name1)
+    yolo_1_graph = yolo_1.graph
+    target_opset = 9
+    from keras2onnx.common import OnnxObjectContainer
+    from keras2onnx.proto import helper, onnx_proto
+    container = OnnxObjectContainer(target_opset)
+    # Create a graph from its main components
+    nodes = []
+    nodes.extend(yolo_0_graph.node)
+    nodes.extend(yolo_1_graph.node)
+    model_name = 'yolov3'
+    inputs = []
+    inputs.extend(yolo_0_graph.input)
+    for input_ in yolo_1_graph.input:
+        if input_.name == 'image_shape:01':
+            inputs.extend([input_])
+    container.inputs = inputs
+    outputs = []
+    outputs.extend(yolo_1_graph.output)
+    container.outputs = outputs
+    container.initializers.extend(yolo_0_graph.initializer)
+    container.initializers.extend(yolo_1_graph.initializer)
+    value_info = []
+    value_info.extend(yolo_0_graph.value_info)
+    value_info.extend(yolo_1_graph.value_info)
+    container.value_info = value_info
+
+    container.add_node('Identity', 'conv2d_59/BiasAdd:0', 'y1:01')
+    container.add_node('Identity', 'conv2d_67/BiasAdd:0', 'y2:01')
+    container.add_node('Identity', 'conv2d_75/BiasAdd:0', 'y3:01')
+
+    graph = helper.make_graph(nodes + container.nodes, model_name, container.inputs,
+                              container.outputs, container.initializers)
+
+    # Add extra information related to the graph
+    graph.value_info.extend(container.value_info)
+
+    # Create model
+    onnx_model = helper.make_model(graph)
+
+    # Add extra information
+    from keras2onnx.common import utils
+    onnx_model.ir_version = onnx_proto.IR_VERSION
+    onnx_model.producer_name = utils.get_producer()
+    onnx_model.producer_version = utils.get_producer_version()
+    onnx_model.domain = utils.get_domain()
+    onnx_model.model_version = utils.get_model_version()
+    onnx_model.doc_string = ''
+
+    onnx.save_model(onnx_model, name_output)
+
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Need an image name to detect.")
         exit(-1)
 
     if '-c' in sys.argv:
-        convert_model(YOLO(), 'model_data/yolov3_0.onnx', 'model_data/yolov3_1.onnx')
+        name0 = 'model_data/yolov3_0.onnx'
+        name1 = 'model_data/yolov3_1.onnx'
+        name_merge = 'model_data/yolov3.onnx'
+        convert_model(YOLO(), name0, name1)
+        merge_model(name0, name1, name_merge)
     else:
         detect_img(YOLO(), sys.argv[1])
