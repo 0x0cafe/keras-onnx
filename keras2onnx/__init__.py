@@ -9,7 +9,7 @@ This package converts keras and tensorflow models into ONNX for use with Windows
 """
 
 
-__version__ = "1.3.3"
+__version__ = "1.4.1"
 __author__ = "Microsoft Corporation"
 __producer__ = "keras2onnx"
 

@@ -390,7 +390,7 @@ set_converter(YOLONMSLayer, convert_NMSLayer)
 
 def convert_model(yolo, name0, name1):
     yolo.load_model()
-    target_opset_number = 9
+    target_opset_number = 10
     if not os.path.exists(name0):
         onnxmodel = convert_keras(yolo.yolo_model, channel_first_inputs=['input_1'],
                                   debug_mode=True, custom_op_conversions=_custom_op_handlers, target_opset=target_opset_number)
@@ -403,17 +403,17 @@ def convert_model(yolo, name0, name1):
 def merge_model(name0, name1, name_output):
     if not (os.path.exists(name0) and os.path.exists(name1)):
         raise RuntimeError('The source submodels do not exist for merging.')
-
+    '''
     if os.path.exists(name_output):
         print("The merged model already exists, skip merging")
         return
-
+    '''
     import onnx
     yolo_0 = onnx.load_model(name0)
     yolo_0_graph = yolo_0.graph
     yolo_1 = onnx.load_model(name1)
     yolo_1_graph = yolo_1.graph
-    target_opset = 9
+    target_opset = 10
     from keras2onnx.common import OnnxObjectContainer
     from keras2onnx.proto import helper, onnx_proto
     container = OnnxObjectContainer(target_opset)
