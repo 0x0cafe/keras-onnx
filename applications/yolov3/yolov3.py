@@ -471,7 +471,7 @@ if __name__ == '__main__':
         name0 = 'model_data/yolov3_0.onnx'
         name1 = 'model_data/yolov3_1.onnx'
         name_merge = 'model_data/yolov3.onnx'
-        convert_model(YOLO(), name0, name1)
+        # convert_model(YOLO(), name0, name1)
         merge_model(name0, name1, name_merge)
     else:
         detect_img(YOLO(), sys.argv[1])

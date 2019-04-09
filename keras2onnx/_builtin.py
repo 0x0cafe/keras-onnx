@@ -25,6 +25,14 @@ set_converter('identity', default_convert)
 set_converter('reshape_timedistributed', convert_reshape_timedistributed)
 
 
+def process_begin_end(new_begin, new_end, stride):
+    if stride >= 0:
+        new_begin.append(0)
+        new_end.append(sys.maxsize)
+    else:
+        new_begin.append(-1)
+        new_end.append(-sys.maxsize)
+
 def on_StridedSlice(ctx, node, name, args):
     # for now we implement common cases. Things like strides!=1, -1 are not mappable to onnx.
     not_supported_attr = ["ellipsis_mask"]
@@ -47,30 +55,25 @@ def on_StridedSlice(ctx, node, name, args):
     new_begin = []
     new_end = []
     axes = []
+    steps = []
     # onnx slice op can't remove a axis, track axis and add a squeeze op if needed
     needs_squeeze = []
-    reverse_axes = []
     for idx, begin_item in enumerate(begin):
         end_item = end[idx]
-        if strides[idx] == -1:
-            reverse_axes.append(idx)
-        if strides[idx] != 1 and strides[idx] != -1:
-            raise ValueError("StridedSlice: only strides=1, -1 are supported, current stride =" + str(strides[idx]))
         axes.append(idx)
+        steps.append(strides[idx])
+        if strides[idx] > 1:
+            aa = 1
+        if strides[idx] < 0:
+            aa = 1
 
         if (begin_mask >> idx) & 1 != 0 and (end_mask >> idx) & 1 != 0:
-            new_begin.append(0)
-            new_end.append(max_size)
+            process_begin_end(new_begin, new_end, strides[idx])
             continue
 
         if begin_item == 0 and end_item == 0:
-            new_begin.append(0)
-            new_end.append(max_size)
+            process_begin_end(new_begin, new_end, strides[idx])
             continue
-
-        # an implicit condition is stride == 1 (checked in above)
-        if begin_item < 0 and end_item == 0:
-            end_item = max_size
 
         mask = (shrink_axis_mask >> idx) & 1
         if mask != 0:
@@ -80,25 +83,32 @@ def on_StridedSlice(ctx, node, name, args):
             continue
 
         if (begin_mask >> idx) & 1 != 0:
-            new_begin.append(0)
+            new_begin.append(0) if strides[idx] >= 0 else new_begin.append(-1)
             new_end.append(end_item)
             continue
 
         if (end_mask >> idx) & 1 != 0:
             new_begin.append(begin_item)
-            new_end.append(max_size)
+            new_end.append(max_size) if strides[idx] >= 0 else new_begin.append(-max_size)
             continue
 
         new_begin.append(begin_item)
         new_end.append(end_item)
 
-    node.set_attr("starts", new_begin)
-    node.set_attr("ends", new_end)
-    node.set_attr("axes", axes)
+    start_name = tf2onnx.utils.make_name(node.name)
+    start_node = ctx.make_const(start_name, np.array(new_begin, dtype=np.int64))
+    end_name = tf2onnx.utils.make_name(node.name)
+    end_node = ctx.make_const(end_name, np.array(new_end, dtype=np.int64))
+    axes_name = tf2onnx.utils.make_name(node.name)
+    axes_node = ctx.make_const(axes_name, np.array(axes, dtype=np.int64))
+    step_name = tf2onnx.utils.make_name(node.name)
+    step_node = ctx.make_const(step_name, np.array(steps, dtype=np.int64))
+
+    node.input[1] = start_node.output[0]
+    node.input[2] = end_node.output[0]
+    node.input[3] = axes_node.output[0]
+    node.input.append(step_node.output[0])
     node.type = "Slice"
-    ctx.remove_input(node, node.input[3])
-    ctx.remove_input(node, node.input[2])
-    ctx.remove_input(node, node.input[1])
     nodes = [node]
 
     new_axis_axes = []
@@ -116,29 +126,9 @@ def on_StridedSlice(ctx, node, name, args):
         input_dtype = ctx.get_dtype(node.output[0])
         ctx.set_dtype(unsqueeze_node.output[0], input_dtype)
 
-    use_reverse_op = True
-    reverse_flag = False
-    if use_reverse_op and len(reverse_axes) > 0:
-        name = tf2onnx.utils.make_name(node.name)
-        name = name + '_reverse'
-        reverse_node = ctx.insert_new_node_on_output("Reverse", node.output[0], name)
-        reverse_node.set_attr("axes", reverse_axes)
-        reverse_node.domain = 'com.microsoft'
-        nodes.append(reverse_node)
-        input_dtype = ctx.get_dtype(node.output[0])
-        ctx.set_dtype(reverse_node.output[0], input_dtype)
-        ctx.copy_shape(node.output[0], reverse_node.output[0])
-        reverse_flag = True
-
     if needs_squeeze:
         name = tf2onnx.utils.make_name(node.name)
-        if use_reverse_op:
-            if reverse_flag:
-                squeeze_node = ctx.insert_new_node_on_output("Squeeze", reverse_node.output[0], name)
-            else:
-                squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
-        else:
-            squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
+        squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
         squeeze_node.set_attr("axes", needs_squeeze)
         nodes.append(squeeze_node)
         input_dtype = ctx.get_dtype(node.output[0])

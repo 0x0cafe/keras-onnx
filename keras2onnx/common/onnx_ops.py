@@ -416,6 +416,7 @@ def apply_upsample(scope, input_name, output_name, container, operator_name=None
 
         container.add_node('Upsample', inputs, output_name, op_version=op_version, **attrs)
     else:
+        # TODO, we need verify this after onnx opset 10 release
         name = _create_name_or_use_existing_one(scope, 'Resize', operator_name)
         attrs = {'name': name}
         attrs['mode'] = mode.lower()
