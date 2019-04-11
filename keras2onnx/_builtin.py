@@ -33,8 +33,8 @@ def process_begin_end(new_begin, new_end, stride):
         new_begin.append(-1)
         new_end.append(-sys.maxsize)
 
+
 def on_StridedSlice(ctx, node, name, args):
-    # for now we implement common cases. Things like strides!=1, -1 are not mappable to onnx.
     not_supported_attr = ["ellipsis_mask"]
     for attr_name in not_supported_attr:
         attr = node.get_attr(attr_name)
@@ -62,10 +62,6 @@ def on_StridedSlice(ctx, node, name, args):
         end_item = end[idx]
         axes.append(idx)
         steps.append(strides[idx])
-        if strides[idx] > 1:
-            aa = 1
-        if strides[idx] < 0:
-            aa = 1
 
         if (begin_mask >> idx) & 1 != 0 and (end_mask >> idx) & 1 != 0:
             process_begin_end(new_begin, new_end, strides[idx])
